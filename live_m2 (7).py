@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -358,7 +359,11 @@ def totp_now(secret):
 
 
 def ensure_angel_packages():
-    """Safety net: if the host did not install requirements.txt, install the Angel One packages once, at run time."""
+    """Safety net: if the host did not install requirements.txt, install the Angel One packages once, at run time.
+    site-packages can be read-only on the host, so they go into a writable folder that is added to sys.path."""
+    target = os.path.join(tempfile.gettempdir(), 'angel_pkgs')
+    if os.path.isdir(target) and target not in sys.path:
+        sys.path.insert(0, target)
     try:
         import SmartApi, logzero, websocket                       # noqa: F401
         from SmartApi.smartWebSocketV2 import SmartWebSocketV2    # noqa: F401
@@ -367,17 +372,16 @@ def ensure_angel_packages():
         pass
     import importlib, subprocess
     pk = ['smartapi-python', 'logzero', 'websocket-client', 'pycryptodome', 'pyotp']
-    cmds = [[sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check'] + pk]
+    cmds = [[sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--target', target] + pk]
     uv = shutil.which('uv')
-    if uv:                                                         # hosts that build the venv with uv have no pip inside it
-        cmds.append([uv, 'pip', 'install', '--quiet', '--python', sys.executable] + pk)
-    cmds.append([sys.executable, '-m', 'uv', 'pip', 'install', '--quiet', '--python', sys.executable] + pk)
-    cmds.append([sys.executable, '-m', 'ensurepip', '--upgrade'])
-    cmds.append(cmds[0])
+    if uv:                                                         # hosts that build the venv with uv
+        cmds.append([uv, 'pip', 'install', '--quiet', '--python', sys.executable, '--target', target] + pk)
     errs = []
     for c in cmds:
         r = subprocess.run(c, capture_output=True, text=True)
-        if r.returncode == 0 and c[-1] != '--upgrade':
+        if r.returncode == 0:
+            if target not in sys.path:
+                sys.path.insert(0, target)
             importlib.invalidate_caches()
             return
         errs.append(' '.join(c[:5]) + ' -> ' + ((r.stderr or r.stdout or '').strip()[-300:]))
