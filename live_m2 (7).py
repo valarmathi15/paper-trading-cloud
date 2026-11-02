@@ -366,9 +366,22 @@ def ensure_angel_packages():
     except ImportError:
         pass
     import importlib, subprocess
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check',
-                           'smartapi-python', 'logzero', 'websocket-client', 'pycryptodome', 'pyotp'])
-    importlib.invalidate_caches()
+    pk = ['smartapi-python', 'logzero', 'websocket-client', 'pycryptodome', 'pyotp']
+    cmds = [[sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check'] + pk]
+    uv = shutil.which('uv')
+    if uv:                                                         # hosts that build the venv with uv have no pip inside it
+        cmds.append([uv, 'pip', 'install', '--quiet', '--python', sys.executable] + pk)
+    cmds.append([sys.executable, '-m', 'uv', 'pip', 'install', '--quiet', '--python', sys.executable] + pk)
+    cmds.append([sys.executable, '-m', 'ensurepip', '--upgrade'])
+    cmds.append(cmds[0])
+    errs = []
+    for c in cmds:
+        r = subprocess.run(c, capture_output=True, text=True)
+        if r.returncode == 0 and c[-1] != '--upgrade':
+            importlib.invalidate_caches()
+            return
+        errs.append(' '.join(c[:5]) + ' -> ' + ((r.stderr or r.stdout or '').strip()[-300:]))
+    raise RuntimeError('Could not install the Angel One packages: ' + ' || '.join(errs))
 
 
 def angel_login(client_id, api_key, mpin, totp_secret):
