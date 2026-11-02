@@ -357,8 +357,23 @@ def totp_now(secret):
     return f"{(struct.unpack('>I', digest[o:o + 4])[0] & 0x7fffffff) % 10 ** 6:06d}"
 
 
+def ensure_angel_packages():
+    """Safety net: if the host did not install requirements.txt, install the Angel One packages once, at run time."""
+    try:
+        import SmartApi, logzero, websocket                       # noqa: F401
+        from SmartApi.smartWebSocketV2 import SmartWebSocketV2    # noqa: F401
+        return
+    except ImportError:
+        pass
+    import importlib, subprocess
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check',
+                           'smartapi-python', 'logzero', 'websocket-client', 'pycryptodome', 'pyotp'])
+    importlib.invalidate_caches()
+
+
 def angel_login(client_id, api_key, mpin, totp_secret):
     """Login with Client ID + MPIN + TOTP (the 6-digit code is generated from your TOTP secret)."""
+    ensure_angel_packages()
     from SmartApi import SmartConnect
     smart = SmartConnect(api_key=api_key)
     res = smart.generateSession(client_id, mpin, totp_now(totp_secret))
