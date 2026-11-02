@@ -347,12 +347,21 @@ def run_group(items, limit):
 SCRIP_URL = 'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json'
 
 
+def totp_now(secret):
+    """6-digit TOTP code from the secret (standard RFC 6238, 30 s, SHA1) - no pyotp package needed."""
+    import base64, hashlib, hmac, struct
+    s = re.sub(r'[\s-]', '', str(secret)).upper()
+    key = base64.b32decode(s + '=' * (-len(s) % 8), casefold=True)
+    digest = hmac.new(key, struct.pack('>Q', int(time.time() // 30)), hashlib.sha1).digest()
+    o = digest[-1] & 15
+    return f"{(struct.unpack('>I', digest[o:o + 4])[0] & 0x7fffffff) % 10 ** 6:06d}"
+
+
 def angel_login(client_id, api_key, mpin, totp_secret):
     """Login with Client ID + MPIN + TOTP (the 6-digit code is generated from your TOTP secret)."""
-    import pyotp
     from SmartApi import SmartConnect
     smart = SmartConnect(api_key=api_key)
-    res = smart.generateSession(client_id, mpin, pyotp.TOTP(totp_secret.replace(' ', '')).now())
+    res = smart.generateSession(client_id, mpin, totp_now(totp_secret))
     if not res or not res.get('status'):
         raise ValueError((res or {}).get('message', 'login failed'))
     smart._login_data = res.get('data') or {}
