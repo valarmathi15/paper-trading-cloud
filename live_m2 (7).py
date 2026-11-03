@@ -334,7 +334,10 @@ def run_group(items, limit):
         try:
             msg = it['g'].send(None)                                   # process this bar
             while msg[0] == 'ASK':
-                held = sum(1 for j, o in enumerate(items) if j != i and o['state']['lots'] > 0)
+                holders = [j for j, o in enumerate(items) if j != i and o['state']['lots'] > 0]
+                held = len(holders)
+                it.setdefault('ask_log', []).append((msg[1], held < limit,                 # (bar, granted?, who held the slots)
+                                                     [(items[j].get('s') or {}).get('symbol', str(j)) for j in holders]))
                 msg = it['g'].send(held < limit)
             heapq.heappush(heap, (msg[1], i))
         except StopIteration as e:
@@ -981,6 +984,7 @@ def evaluate_group(strategies):
     results = run_group(items, limit)
     for i, it in enumerate(items):
         out[it['s']['name']] = _eval_finish(it['s'], ctxs[i], it['trace'], results[i])
+        out[it['s']['name']]['ask_log'] = it.get('ask_log', [])[-200:]
     return out
 
 
@@ -1900,7 +1904,9 @@ def group_entry_view(fol, members, stats, evs, lim):
                 row.update({'Last bar': str(r['Date'])[:16], 'Close': round(cl, 2),
                             'Cloud (low - high)': f'{bot:,.2f} - {top:,.2f}', 'Close is': side})
                 if bool(r.get('Blocked', False)):
-                    why = f'Entry signal, but all {lim} slots are full'
+                    asks = [a for a in ev.get('ask_log', []) if a[0] == r['Date'] and not a[1]]
+                    who = ', '.join(asks[-1][2]) if asks and asks[-1][2] else ''
+                    why = f'Entry signal, but all {lim} slots are full' + (f' (held by: {who})' if who else '')
                 elif bool(r['Above']):
                     why = 'Entry signal on the last candle (slot free) - enters on this bar'
                 else:
