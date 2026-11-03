@@ -1831,17 +1831,81 @@ def pnl_txt(x, pct=None):
     return f":{col}[{x:,.2f}]" + ('' if pct is None else f" ({pct:+.2f}%)")
 
 
+def slot_notes(fol, files, evs):
+    """Replay every ENTRY / EXIT of a folder in time order -> {(strategy name, bar time, signal): text}.
+    EXIT row  : 'Slot freed ... -> X came in at 13:21'   (who took the slot afterwards)
+    ENTRY row : 'Took the slot of Y (exited 13:12)'      (only when X had waited because all slots were full)"""
+    groups = {}
+    for f, s in files:
+        g = s.get('group') or {}
+        groups.setdefault(g.get('id') if g.get('limit') else None, []).append((f, s))
+    notes = {}
+    for gid, mem in groups.items():
+        lim = int((mem[0][1].get('group') or {}).get('limit') or 0) if gid is not None else 0
+        events = []                                                  # (time, order, symbol, strategy name, signal)
+        for f, s in mem:
+            ev = evs.get((fol, f))
+            if ev is None or ev['tr'].empty:
+                continue
+            flat, waiting = True, False
+            for _, r in ev['tr'].iterrows():
+                tm, sig = r['Date'], r['Signal']
+                if bool(r.get('Blocked', False)) and flat and not waiting:
+                    waiting = True                                   # entry signal came but all slots were full
+                    events.append((tm, 1, s['symbol'], s['name'], 'WAIT'))
+                if sig == 'HOLD':
+                    continue
+                if sig == 'BUY' and flat:
+                    flat, waiting = False, False
+                    events.append((tm, 0, s['symbol'], s['name'], sig))
+                elif sig in ('EXIT', 'BUY+EXIT') and not flat:
+                    flat = True
+                    events.append((tm, -1, s['symbol'], s['name'], sig))
+        holding, freed, waiting = [], [], {}
+        for tm, order, sym, name, sig in sorted(events, key=lambda e: (e[0], e[1])):
+            hhmm = str(tm)[11:16]
+            if order == 1:
+                waiting.setdefault(sym, hhmm)
+            elif order == 0:
+                holding.append(sym)
+                used = f' · slots {len(holding)}/{lim}' if lim else ''
+                if sym in waiting and freed:
+                    w = waiting.pop(sym)
+                    o_sym, o_tm, o_key = freed.pop(0)
+                    notes[(name, str(tm)[:16], sig)] = f'Took the slot of {o_sym} (exited {o_tm}) - waited since {w}{used}'
+                    notes[o_key] = notes.get(o_key, '') + f' -> {sym} came in at {hhmm}'
+                elif sym in waiting:
+                    waiting.pop(sym)
+                    notes[(name, str(tm)[:16], sig)] = f'Got a free slot{used}'
+                else:
+                    notes[(name, str(tm)[:16], sig)] = ('First fill - free slot' + used) if lim else ''
+            else:
+                if sym in holding:
+                    holding.remove(sym)
+                key = (name, str(tm)[:16], sig)
+                nxt = f' · next in line: {", ".join(waiting)}' if waiting else ''
+                notes[key] = (f'Slot freed ({len(holding)}/{lim} used){nxt}' if lim else 'Exited') 
+                freed.append((sym, hhmm, key))
+    return notes
+
+
 def group_entry_view(fol, members, stats, evs, lim):
     """'View entry stocks' of one group: which stocks entered live, which exited (slot freed) and came in again, which still wait."""
     per, events = {}, []
     for f, s in members:
         ev = evs.get((fol, f))
         info = {'entries': 0, 'first': None, 'last_exit': None, 'lots': 0}
-        flat = True
+        flat, wait_ = True, False
         if ev is not None and not ev['tr'].empty:
-            for _, r in ev['tr'][ev['tr']['Signal'] != 'HOLD'].iterrows():
+            for _, r in ev['tr'].iterrows():
                 tm, sig = r['Date'], r['Signal']
+                if bool(r.get('Blocked', False)) and flat and not wait_:
+                    wait_ = True
+                    events.append((tm, 1, s['symbol'], 'WAIT', 0))
+                if sig == 'HOLD':
+                    continue
                 if sig == 'BUY' and flat:
+                    wait_ = False
                     flat = False
                     info['entries'] += 1
                     info['first'] = info['first'] or tm
@@ -1870,10 +1934,19 @@ def group_entry_view(fol, members, stats, evs, lim):
         else:
             st.caption('No stock has taken an entry yet.')
         if events:                                                  # replay in time order -> who holds a slot after every event
-            inn, freed, log = [], [], []
+            inn, freed, log, waitq = [], [], [], []
             for tm, order, sym, what, lots in sorted(events, key=lambda e: (e[0], e[1])):
+                if order == 1:                                      # entry signal, but all slots were full
+                    waitq.append(sym)
+                    continue
                 if order == 0:
-                    note = f'took the slot freed by {freed.pop(0)}' if freed else 'free slot (first fill)'
+                    if sym in waitq and freed:
+                        waitq.remove(sym)
+                        note = f'took the slot freed by {freed.pop(0)}'
+                    else:
+                        if sym in waitq:
+                            waitq.remove(sym)
+                        note = 'free slot (first fill)'
                     inn.append(sym)
                 else:
                     if sym in inn:
@@ -2147,6 +2220,9 @@ def page_view(topic, refresh):
                             acts.append({'Bar time': str(r['Date'])[:16], 'Strategy': s['name'], 'Signal': r['Signal'], 'Type': kind_,
                                          'Price': round(float(r['Close']), 2), 'Lots after': lots_})
                 if acts:
+                    nt_ = slot_notes(fol, files, evs)
+                    for a_ in acts:
+                        a_['Slot note'] = nt_.get((a_['Strategy'], a_['Bar time'], a_['Signal']), '')
                     st.caption(f'All signals since start ({len(acts)}) - latest first, scroll for the 1st lot / older entries')
                     st.dataframe(pd.DataFrame(acts).sort_values('Bar time', ascending=False, kind='stable'),
                                  width='stretch', hide_index=True, height=min(400, 38 * (len(acts) + 1)))
