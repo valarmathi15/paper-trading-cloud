@@ -1827,6 +1827,56 @@ def pnl_txt(x, pct=None):
     return f":{col}[{x:,.2f}]" + ('' if pct is None else f" ({pct:+.2f}%)")
 
 
+def group_entry_view(fol, members, stats, evs, lim):
+    """'View entry stocks' of one group: which stocks entered live, which exited (slot freed) and came in again, which still wait."""
+    per, events = {}, []
+    for f, s in members:
+        ev = evs.get((fol, f))
+        info = {'entries': 0, 'first': None, 'last_exit': None, 'lots': 0}
+        flat = True
+        if ev is not None and not ev['tr'].empty:
+            for _, r in ev['tr'][ev['tr']['Signal'] != 'HOLD'].iterrows():
+                tm, sig = r['Date'], r['Signal']
+                if sig == 'BUY' and flat:
+                    flat = False
+                    info['entries'] += 1
+                    info['first'] = info['first'] or tm
+                    events.append((tm, 0, s['symbol'], 'ENTRY - slot taken', int(r['Lots'])))
+                elif sig in ('EXIT', 'BUY+EXIT') and not flat:
+                    flat = True
+                    info['last_exit'] = tm
+                    events.append((tm, -1, s['symbol'], 'EXIT - slot freed', 0))
+            if ev['last'] is not None and not ev['flat']:
+                info['lots'] = int(ev['last']['Lots'])
+        per[f] = info
+    holding = [(f, s) for f, s in members if stats[f]['open_n'] > 0]
+    exited = [(f, s) for f, s in members if stats[f]['open_n'] == 0 and per[f]['entries'] > 0]
+    waiting = [(f, s) for f, s in members if stats[f]['open_n'] == 0 and per[f]['entries'] == 0]
+    with st.expander(f'📋 View entry stocks  ·  🟢 {len(holding)} holding  ·  ✔ {len(exited)} exited  ·  ⏳ {len(waiting)} waiting'):
+        rows = []
+        for f, s in holding + exited:
+            i, x = per[f], stats[f]
+            rows.append({'Stock': s['symbol'],
+                         'Status': (f"🟢 Holding {i['lots']} lots" if x['open_n'] else '✔ Exited - can enter again'),
+                         'First entry': str(i['first'])[:16] if i['first'] is not None else '-',
+                         'Last exit': str(i['last_exit'])[:16] if i['last_exit'] is not None else '-',
+                         'Entries': i['entries'], 'P&L': round(x['realized'] + x['unreal'], 2)})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        else:
+            st.caption('No stock has taken an entry yet.')
+        if waiting:
+            st.caption(f'⏳ Waiting for a free slot / first entry ({len(waiting)}): ' + ', '.join(s['symbol'] for _, s in waiting))
+        if events:                                                  # replay in time order -> how many slots were used after each event
+            used, log = 0, []
+            for tm, order, sym, what, lots in sorted(events, key=lambda e: (e[0], e[1])):
+                used += 1 if order == 0 else -1
+                log.append({'Bar time': str(tm)[:16], 'Stock': sym, 'What': what, 'Lots after': lots,
+                            'Slots used': f"{used} / {lim}"})
+            st.caption('Entry / exit order (latest first)')
+            st.dataframe(pd.DataFrame(log[::-1]), width='stretch', hide_index=True)
+
+
 def row_stats(s, ev, err, loading=False):
     if s.get('stopped'):
         f = s.get('final', {})
@@ -1990,6 +2040,7 @@ def page_view(topic, refresh):
                         for f, _ in members:
                             delete_strategy(fol, f)
                         st.rerun()
+                group_entry_view(fol, members, stats, evs, lim)
                 # Main list = ONLY the stocks holding a position right now (never more than the limit).
                 # Stocks that already exited stay in a fold below (their P&L is still inside the group total);
                 # stocks that never got a slot are just listed by name.
@@ -2127,15 +2178,22 @@ def page_view(topic, refresh):
                         for f, _ in members:
                             delete_strategy(fol, f)
                         st.rerun()
-                # ONLY the stocks that really took an entry (holding now, or already traded / exited) are listed.
-                # Stocks that are still waiting for a free slot stay hidden in a separate fold until their 1st entry.
-                active = [(f, s) for f, s in members if stats[f]['open_n'] > 0 or stats[f]['closed_n'] > 0 or s.get('stopped')]
-                waiting = [(f, s) for f, s in members if (f, s) not in active]
-                if st.toggle(f'Show the {len(active)} entered stocks', key=f'grpopen_{fol}_{gid}'):
+                group_entry_view(fol, members, stats, evs, lim)
+                # Main list = ONLY the stocks holding a position right now (never more than the limit).
+                # Stocks that already exited stay in a fold below (their P&L is still inside the group total);
+                # stocks that never got a slot are just listed by name.
+                active = [(f, s) for f, s in members if stats[f]['open_n'] > 0]
+                exited = [(f, s) for f, s in members if stats[f]['open_n'] == 0 and (stats[f]['closed_n'] > 0 or s.get('stopped'))]
+                waiting = [(f, s) for f, s in members if stats[f]['open_n'] == 0 and stats[f]['closed_n'] == 0 and not s.get('stopped')]
+                if st.toggle(f'Show the {len(active)} holding stocks', key=f'grpopen_{fol}_{gid}'):
                     if not active:
-                        st.caption('No stock has taken an entry yet.')
+                        st.caption('No stock is holding a position right now.')
                     for f, s in active:
                         render_row(fol, f, s, stats)
+                    if exited:
+                        with st.expander(f'✔ {len(exited)} exited (slot free)'):
+                            for f, s in exited:
+                                render_row(fol, f, s, stats)
                     if waiting:
                         with st.expander(f'⏳ {len(waiting)} waiting for a free slot (no entry yet)'):
                             st.caption(', '.join(s['symbol'] for _, s in waiting))
