@@ -2141,11 +2141,15 @@ def page_view(topic, refresh):
                     ev = evs.get((fol, f))
                     if ev is not None and not ev['tr'].empty:
                         for _, r in ev['tr'][ev['tr']['Signal'] != 'HOLD'].iterrows():
-                            acts.append({'Bar time': str(r['Date'])[:16], 'Strategy': s['name'], 'Signal': r['Signal'],
-                                         'Price': round(float(r['Close']), 2), 'Lots after': int(r['Lots'])})
+                            lots_ = int(r['Lots'])
+                            kind_ = ('EXIT' if r['Signal'] == 'EXIT' else 'EXIT + new entry' if r['Signal'] == 'BUY+EXIT'
+                                     else 'ENTRY (1st lot)' if lots_ == 1 else f'ADD lot {lots_}')
+                            acts.append({'Bar time': str(r['Date'])[:16], 'Strategy': s['name'], 'Signal': r['Signal'], 'Type': kind_,
+                                         'Price': round(float(r['Close']), 2), 'Lots after': lots_})
                 if acts:
-                    st.caption(f'Latest signals ({len(acts)} since start)')
-                    st.dataframe(pd.DataFrame(acts).sort_values('Bar time', ascending=False).head(8), width='stretch', hide_index=True)
+                    st.caption(f'All signals since start ({len(acts)}) - latest first, scroll for the 1st lot / older entries')
+                    st.dataframe(pd.DataFrame(acts).sort_values('Bar time', ascending=False, kind='stable'),
+                                 width='stretch', hide_index=True, height=min(400, 38 * (len(acts) + 1)))
                 else:
                     st.caption('No signal yet - a strategy acts only when a candle CLOSES after its start time.')
                 st.divider()
