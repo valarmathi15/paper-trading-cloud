@@ -828,7 +828,7 @@ def delete_strategy(folder, fname):
     os.remove(os.path.join(user_dir(), safe(folder), fname))
 
 
-def create_strategies(folder, prefix, exchange, symbols, tfs, capital, sizes, close, lots_list, exits, candles, start, entries=('above',), methods=(1,), max_open=0):
+def create_strategies(folder, prefix, exchange, symbols, tfs, capital, sizes, close, lots_list, exits, candles, start, entries=('above',), methods=(1,), max_open=0, pairs=None):
     """one file per symbol x timeframe x lots x size x exit option x candle mode. Existing file is NOT overwritten (keeps its start time)."""
     d = os.path.join(user_dir(), safe(folder))
     os.makedirs(d, exist_ok=True)
@@ -849,6 +849,8 @@ def create_strategies(folder, prefix, exchange, symbols, tfs, capital, sizes, cl
                 else:
                     ex = ex0
                 for cd in candles:
+                    if pairs is not None and (cd, tf) not in pairs:        # this Buy-on mode was not given this timeframe
+                        continue
                     cdc = CANDLE_OPTIONS[cd]
                     amt = capital / len(symbols) / lots if kind == 'eq' else val      # equal weightage: capital / symbols / max lots
                     name = (f"{prefix + ' ' if prefix else ''}{sym} {tf} {lots}lots {exit_label(ex)}"
@@ -1242,16 +1244,13 @@ def page_builder():
         with c2:
             lbl('File Name')
             prefix = st.text_input('File Name', label_visibility='collapsed', placeholder='e.g. NSE morning')
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         with c1:
             lbl('Exchange')
             exchange = st.selectbox('Exchange', ['NSE', 'MCX', 'NFO', 'BSE'], label_visibility='collapsed')
         with c2:
             lbl('Capital')
             capital = st.number_input('Capital', min_value=0.0, value=1000000.0, step=10000.0, label_visibility='collapsed')
-        with c3:
-            lbl('Candle timeframe (one file each)')
-            tfs = checkbox_dropdown('Select timeframe', list(TF), ['1D'], 'tf')
 
         with st.container(border=True):                       # ---- ENTRY CONDITION
             section_title('Entry condition', 'Ichimoku cloud - method, index, stocks, candle, position size (live: starts from now)')
@@ -1344,6 +1343,21 @@ def page_builder():
                                            help='0 = no limit. Example: 50 stocks selected, limit 10 -> only the first 10 stocks that give an entry are '
                                                 'taken. Another stock can enter only when one of the open stocks has fully exited. '
                                                 'Stocks already open can still add lots up to Max lots.')
+            # every ticked Buy-on mode gets its own timeframe picker (1m ... 1H, 4H, 1D) - one file per mode x timeframe
+            TF_DEFAULT = {'Every candle': ['1D'], 'Daily': ['1H'], 'Weekly': ['1D']}
+            mode_tfs, tfs, cd_pairs = {}, [], []
+            if candles:
+                tcols = st.columns(len(candles))
+                for col, cd in zip(tcols, candles):
+                    with col:
+                        lbl(f'Timeframe for "{cd}" (one file each)')
+                        mode_tfs[cd] = checkbox_dropdown(f'Select timeframe - {cd}', list(TF), TF_DEFAULT.get(cd, ['1D']), f'tf_{CANDLE_OPTIONS[cd]}')
+                    for tf_ in mode_tfs[cd]:
+                        cd_pairs.append((cd, tf_))
+                        if tf_ not in tfs:
+                            tfs.append(tf_)
+                if cd_pairs:
+                    st.caption('Files will be made for:  ' + '   |   '.join(f'{cd} → {", ".join(v) if v else "-"}' for cd, v in mode_tfs.items()))
             if max_open:
                 st.caption(f'Portfolio limit {max_open}: at most {max_open} stocks hold a position together (separately for every '
                            f'timeframe / lots / exit / entry / method combination). A waiting stock enters when a slot frees up.')
@@ -1418,17 +1432,17 @@ def page_builder():
                 seen.add(x.upper())
                 symbols.append(x)
         n_other = len([m for m in methods if m != 3])
-        n = len(symbols) * len(tfs) * len(lots_list) * len(sizes) * len(candles) * len(entries) * (len(targets) * n_other + (1 if 3 in methods else 0))
+        n = len(symbols) * len(cd_pairs) * len(lots_list) * len(sizes) * len(entries) * (len(targets) * n_other + (1 if 3 in methods else 0))
         exits_to_save = targets if targets else ([M3_EXIT] if 3 in methods else [])
-        st.caption(f'{len(symbols)} symbol(s) x {len(tfs)} timeframe(s) x {len(lots_list)} lots x {len(sizes)} size(s) x '
-                   f'{len(targets)} exits x {len(candles)} candle mode(s) x {len(entries)} entry side(s) x {len(methods)} method(s) (Method 3 = 1 fixed exit) = {n} file(s) will be saved.  Start = {start}  '
+        st.caption(f'{len(symbols)} symbol(s) x {len(lots_list)} lots x {len(sizes)} size(s) x '
+                   f'{len(targets)} exits x {len(cd_pairs)} (buy-on mode, timeframe) pair(s) x {len(entries)} entry side(s) x {len(methods)} method(s) (Method 3 = 1 fixed exit) = {n} file(s) will be saved.  Start = {start}  '
                    f'(first candle that closes after this)')
         if st.button('▶ Start', type='primary'):
             fname = (folder or '').strip()
             if not fname:
                 st.error('Give a folder name.')
             elif n == 0:
-                st.error('Pick (or type) at least one symbol, timeframe, entry method, Max lots, position size, entry side, candle option and exit option.')
+                st.error('Pick (or type) at least one symbol, Buy-on mode with a timeframe, entry method, Max lots, position size, entry side, candle option and exit option.')
             elif n > 150:
                 st.error('Too many files (max 150 at a time).')
             else:
@@ -1439,7 +1453,7 @@ def page_builder():
                     st.error(str(e))
                     return
                 made, skipped = create_strategies(fname, (prefix or '').strip(), exchange, symbols, tfs, capital, sizes,
-                                                  close_t.strftime('%H:%M'), lots_list, exits_to_save, candles, start, entries, methods, int(max_open))
+                                                  close_t.strftime('%H:%M'), lots_list, exits_to_save, candles, start, entries, methods, int(max_open), cd_pairs)
                 if made:
                     st.success(f'Saved {len(made)} PAPER file(s) in folder "{fname}". Paper = numbers only, NO real orders.')
                 if skipped:
