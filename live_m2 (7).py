@@ -1852,7 +1852,7 @@ def group_entry_view(fol, members, stats, evs, lim):
     holding = [(f, s) for f, s in members if stats[f]['open_n'] > 0]
     exited = [(f, s) for f, s in members if stats[f]['open_n'] == 0 and per[f]['entries'] > 0]
     waiting = [(f, s) for f, s in members if stats[f]['open_n'] == 0 and per[f]['entries'] == 0]
-    with st.expander(f'📋 View entry stocks  ·  🟢 {len(holding)} holding  ·  ✔ {len(exited)} exited  ·  ⏳ {len(waiting)} waiting'):
+    with st.expander(f'📋 View entry stocks  ·  🟢 {len(holding)} holding  ·  ✔ {len(exited)} exited  ·  ⏳ {len(waiting)} waiting', expanded=True):
         rows = []
         for f, s in holding + exited:
             i, x = per[f], stats[f]
@@ -1865,16 +1865,51 @@ def group_entry_view(fol, members, stats, evs, lim):
             st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
         else:
             st.caption('No stock has taken an entry yet.')
-        if waiting:
-            st.caption(f'⏳ Waiting for a free slot / first entry ({len(waiting)}): ' + ', '.join(s['symbol'] for _, s in waiting))
-        if events:                                                  # replay in time order -> how many slots were used after each event
-            used, log = 0, []
+        if events:                                                  # replay in time order -> who holds a slot after every event
+            inn, freed, log = [], [], []
             for tm, order, sym, what, lots in sorted(events, key=lambda e: (e[0], e[1])):
-                used += 1 if order == 0 else -1
+                if order == 0:
+                    note = f'took the slot freed by {freed.pop(0)}' if freed else 'free slot (first fill)'
+                    inn.append(sym)
+                else:
+                    if sym in inn:
+                        inn.remove(sym)
+                    freed.append(sym)
+                    note = f'{sym} goes to the exited list - its slot is free'
                 log.append({'Bar time': str(tm)[:16], 'Stock': sym, 'What': what, 'Lots after': lots,
-                            'Slots used': f"{used} / {lim}"})
-            st.caption('Entry / exit order (latest first)')
+                            'Slots used': f'{len(inn)} / {lim}', 'Holding now': ', '.join(inn) or '-', 'Note': note})
+            st.caption('Entry / exit order (latest first) - who holds the slots after every entry / exit')
             st.dataframe(pd.DataFrame(log[::-1]), width='stretch', hide_index=True)
+        flat_rows = []                                              # every stock that is NOT holding: why is it not entering?
+        for f, s in waiting + exited:
+            ev = evs.get((fol, f))
+            row = {'Stock': s['symbol'], 'Last bar': '-', 'Close': None, 'Cloud (low - high)': '-', 'Close is': '-'}
+            if s.get('stopped'):
+                why = 'Stopped (exited by you)'
+            elif ev is None:
+                why = 'Loading candles ...'
+            elif ev.get('data_err') and ev['tr'].empty:
+                why = 'Data problem: ' + str(ev['data_err'])[:60]
+            elif ev['tr'].empty:
+                why = 'No candle has closed after the start time yet'
+            else:
+                r = ev['tr'].iloc[-1]
+                cl, top, bot = float(r['Close']), float(r['CloudTop']), float(r['CloudBottom'])
+                side = 'above cloud' if cl > top else ('below cloud' if cl < bot else 'inside cloud')
+                need = {'below': 'below cloud', 'inside': 'inside cloud'}.get(s.get('entry'), 'above cloud')
+                row.update({'Last bar': str(r['Date'])[:16], 'Close': round(cl, 2),
+                            'Cloud (low - high)': f'{bot:,.2f} - {top:,.2f}', 'Close is': side})
+                if bool(r.get('Blocked', False)):
+                    why = f'Entry signal, but all {lim} slots are full'
+                elif bool(r['Above']):
+                    why = 'Entry signal on the last candle (slot free) - enters on this bar'
+                else:
+                    why = f'No signal - entry needs the close {need}, now it is {side}'
+            row['Why not holding'] = why
+            flat_rows.append(row)
+        if flat_rows:
+            st.caption(f'⏳ Not holding ({len(flat_rows)}): waiting for a first entry or a new signal')
+            st.dataframe(pd.DataFrame(flat_rows), width='stretch', hide_index=True)
 
 
 def row_stats(s, ev, err, loading=False):
